@@ -236,6 +236,7 @@ final class EffectPreferences: ObservableObject {
 struct PreferencesView: View {
     @ObservedObject var preferences: EffectPreferences
     @ObservedObject var activation: ActivationControls
+    let updater: AppUpdater
     let supportsMonochrome: Bool
     let onToggle: () -> Void
     let onChooseApplications: (ApplicationDestination) -> Void
@@ -246,6 +247,8 @@ struct PreferencesView: View {
             activationSettings.tabItem { Label("Activación", systemImage: "bolt") }
             exclusions.tabItem { Label("Exclusiones", systemImage: "eye") }
             groups.tabItem { Label("Grupos", systemImage: "square.stack") }
+            UpdateSettingsView(updater: updater)
+                .tabItem { Label("Actualizaciones", systemImage: "arrow.down.circle") }
         }
         .frame(width: 490, height: 503)
     }

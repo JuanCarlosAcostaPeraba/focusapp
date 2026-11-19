@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import SwiftUI
 import UniformTypeIdentifiers
 
@@ -7,6 +8,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private let focus = FocusController()
     private let preferences = EffectPreferences()
     private let activation = ActivationControls()
+    private let updater = AppUpdater()
     private let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
     private let toggle = NSMenuItem(
         title: "Activar desenfoque",
@@ -16,6 +18,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private let percentage = NSTextField(labelWithString: "")
     private var dimmingSlider: NSSlider?
     private var preferencesWindow: NSWindow?
+    private var settingsItem: NSMenuItem?
+    private var updateTimer: AnyCancellable?
+    private var updateBadgeObserver: AnyCancellable?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         activation.start { [weak self] in self?.toggleFocus() }
@@ -61,6 +66,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             keyEquivalent: ","
         )
         settings.target = self
+        settingsItem = settings
         let quit = menu.addItem(
             withTitle: "Salir de FocusApp",
             action: #selector(NSApplication.terminate(_:)),
@@ -68,7 +74,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         )
         quit.target = NSApp
         statusItem.menu = menu
-        updateStatusButton()
+        updateBadgeObserver = updater.$available
+            .map { $0 != nil }.removeDuplicates()
+            .sink { [weak self] hasUpdate in self?.updateStatusButton(hasUpdate: hasUpdate) }
+        updateTimer = Timer.publish(every: 86_400, tolerance: 60, on: .main, in: .common)
+            .autoconnect()
+            .sink { [weak self] _ in self?.updater.check(automatically: true) }
+        updater.check(automatically: true)
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
@@ -78,6 +90,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         activation.stop()
+        updateTimer?.cancel()
+        updateBadgeObserver?.cancel()
     }
 
     func windowDidResignKey(_ notification: Notification) {
@@ -92,6 +106,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             let content = PreferencesView(
                 preferences: preferences,
                 activation: activation,
+                updater: updater,
                 supportsMonochrome: BlurPanel.supportsMonochrome,
                 onToggle: { [weak self] in self?.toggleFocus() },
                 onChooseApplications: { [weak self] destination in self?.chooseApplications(for: destination) }
@@ -178,16 +193,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         percentage.stringValue = "\(Int((value * 100).rounded())) %"
     }
 
-    private func updateStatusButton() {
-        let description = focus.isEnabled
+    private func updateStatusButton(hasUpdate: Bool? = nil) {
+        let available = hasUpdate ?? (updater.available != nil)
+        var description = focus.isEnabled
             ? "FocusApp, desenfoque activado"
             : "FocusApp, desenfoque desactivado"
+        if available {
+            description += ". Actualización disponible"
+        }
         let symbol = focus.isEnabled ? "dot.viewfinder" : "viewfinder"
-        let image = NSImage(systemSymbolName: symbol, accessibilityDescription: description)
+        let base = NSImage(systemSymbolName: symbol, accessibilityDescription: description)
             ?? NSImage(systemSymbolName: "circle", accessibilityDescription: description)
+        let image = if available, let base {
+            NSImage(size: NSSize(width: 20, height: 18), flipped: false) { _ in
+                base.draw(in: NSRect(x: 0, y: 1, width: 16, height: 16))
+                NSColor.black.setFill()
+                NSBezierPath(ovalIn: NSRect(x: 16, y: 13, width: 4, height: 4)).fill()
+                return true
+            }
+        } else {
+            base
+        }
         image?.isTemplate = true
         statusItem.button?.image = image
         statusItem.button?.toolTip = description
         statusItem.button?.setAccessibilityLabel(description)
+        settingsItem?.title = available ? "Ajustes… · Actualización disponible" : "Ajustes…"
     }
 }

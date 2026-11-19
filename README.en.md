@@ -24,6 +24,10 @@ The public build is ad hoc signed and unnotarized. If macOS blocks the first lau
 
 Preferences are stored locally. The app uses window metadata and does not request Screen Recording or Accessibility permission. When the Core Animation filters are unavailable or **Reduce transparency** is enabled, it falls back to the AppKit material, where monochrome is unavailable.
 
+## Updates
+
+FocusApp checks GitHub for a stable release at startup and daily while it is running. A dot appears on the menu bar icon when a newer version is available. Open **Ajustes → Actualizaciones** to check manually or choose **Descargar DMG** to download and open a verified installer. Quit FocusApp and drag the new app into Applications to replace the previous version.
+
 ## Build
 
 Select Xcode 26 or later and run these commands from the repository root:

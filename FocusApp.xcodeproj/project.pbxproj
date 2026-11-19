@@ -14,6 +14,7 @@
 		A20000000000000000000006 /* ActivationControls.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000007; };
 		A20000000000000000000007 /* CursorShake.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000008; };
 		A20000000000000000000008 /* FocusApp.icns in Resources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000009; };
+		A20000000000000000000009 /* AppUpdater.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000011; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -27,6 +28,7 @@
 		A10000000000000000000008 /* CursorShake.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CursorShake.swift; sourceTree = "<group>"; };
 		A10000000000000000000009 /* FocusApp.icns */ = {isa = PBXFileReference; lastKnownFileType = image.icns; name = FocusApp.icns; path = Resources/FocusApp.icns; sourceTree = "<group>"; };
 		A10000000000000000000010 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		A10000000000000000000011 /* AppUpdater.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppUpdater.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXGroup section */
@@ -47,6 +49,7 @@
 				A10000000000000000000006,
 				A10000000000000000000008,
 				A10000000000000000000007,
+				A10000000000000000000011,
 			);
 			path = FocusApp;
 			sourceTree = "<group>";
@@ -109,6 +112,7 @@
 				A20000000000000000000004,
 				A20000000000000000000005,
 				A20000000000000000000007,
+				A20000000000000000000009,
 				A20000000000000000000006,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -144,10 +148,10 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				CODE_SIGN_IDENTITY = "-";
-				CURRENT_PROJECT_VERSION = 1;
+				CURRENT_PROJECT_VERSION = 2;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = FocusApp/Info.plist;
-				MARKETING_VERSION = 0.1.0;
+				MARKETING_VERSION = 0.1.1;
 				PRODUCT_BUNDLE_IDENTIFIER = app.focusapp.FocusApp;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 			};
@@ -157,10 +161,10 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				CODE_SIGN_IDENTITY = "-";
-				CURRENT_PROJECT_VERSION = 1;
+				CURRENT_PROJECT_VERSION = 2;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = FocusApp/Info.plist;
-				MARKETING_VERSION = 0.1.0;
+				MARKETING_VERSION = 0.1.1;
 				PRODUCT_BUNDLE_IDENTIFIER = app.focusapp.FocusApp;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 			};

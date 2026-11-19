@@ -30,6 +30,12 @@ Los ajustes se guardan localmente. FocusApp usa metadatos de ventanas para segui
 
 Core Animation compone el desenfoque en vivo. FocusApp usa APIs privadas para el radio gaussiano y el monocromo. Si no están disponibles o está activado **Reducir transparencia**, usa el material de AppKit con un ajuste de opacidad.
 
+## Actualizaciones
+
+FocusApp comprueba la última release estable de GitHub al abrirse y cada día mientras sigue en marcha. Si hay una versión nueva, aparece un punto en el icono de la barra de menús. En **Ajustes → Actualizaciones** puedes comprobarlo manualmente o pulsar **Descargar DMG** cuando esté disponible.
+
+FocusApp verifica el SHA-256 antes de guardar el DMG en Descargas y abrirlo. Cierra FocusApp y arrastra la nueva app a **Aplicaciones** para reemplazar la anterior.
+
 ## Compilar desde el código
 
 Desde la raíz del repo, con Xcode 26 o posterior y sus herramientas seleccionadas:
