@@ -5,6 +5,7 @@ import CoreGraphics
 final class FocusController: NSObject {
     private var timer: Timer?
     private var panels: [CGDirectDisplayID: BlurPanel] = [:]
+    private var preparedPanel: (panel: BlurPanel, reducesTransparency: Bool)?
     private var lastFocusedWindowID: Int?
     private var stageManager = StageManagerStrip(enabled: false, onRight: false)
     private var nextStageManagerCheck = 0.0
@@ -46,8 +47,18 @@ final class FocusController: NSObject {
 
     var effect = EffectSettings.subtle {
         didSet {
+            preparedPanel?.panel.apply(effect)
             for panel in panels.values { panel.apply(effect) }
         }
+    }
+
+    func prepareInitialPanel() {
+        guard !isEnabled, panels.isEmpty, let screen = NSScreen.main else { return }
+        // Prepare one hidden panel for whichever display needs the effect first.
+        let reducesTransparency = NSWorkspace.shared.accessibilityDisplayShouldReduceTransparency
+        let panel = BlurPanel(effect: effect)
+        panel.prepare(for: screen.frame)
+        preparedPanel = (panel, reducesTransparency)
     }
 
     func setEnabled(_ enabled: Bool) {
@@ -81,7 +92,7 @@ final class FocusController: NSObject {
             timer = nil
             NSWorkspace.shared.notificationCenter.removeObserver(self)
             NotificationCenter.default.removeObserver(self)
-            removePanels(except: [])
+            for panel in panels.values { panel.dismiss() }
             lastFocusedWindowID = nil
         }
     }
@@ -99,8 +110,8 @@ final class FocusController: NSObject {
     }
 
     private func refreshFocus() {
-        guard isEnabled,
-              let app = NSWorkspace.shared.frontmostApplication,
+        guard isEnabled else { return }
+        guard let app = NSWorkspace.shared.frontmostApplication,
               let snapshot = CGWindowListCopyWindowInfo(
                 [.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID
               ) as? [[String: Any]] else {
@@ -160,8 +171,7 @@ final class FocusController: NSObject {
         on display: FocusDisplay, windows: [WindowInfo], clearOwners: Set<pid_t>,
         protectedWindow: Int?, anchorBelow: Int?, stageWindows: Set<Int>
     ) {
-        let panel = panels[display.id] ?? BlurPanel(effect: effect)
-        panels[display.id] = panel
+        let panel = panel(for: display.id)
         if panel.frame != display.frame {
             panel.setFrame(display.frame, display: false)
         }
@@ -191,9 +201,21 @@ final class FocusController: NSObject {
             behind, on: display, panelID: panelID, clearOwners: clearOwners,
             protectedWindow: protectedWindow, stageWindows: stageWindows
         ))
-        if !panel.isVisible || behind.first?.id != panelID {
-            panel.place(placement, relativeTo: relativeTo)
+        panel.present(placement, relativeTo: relativeTo, needsPlacement: behind.first?.id != panelID)
+    }
+
+    private func panel(for display: CGDirectDisplayID) -> BlurPanel {
+        if let panel = panels[display] { return panel }
+        let prepared = preparedPanel
+        preparedPanel = nil
+        let panel = if let prepared,
+           prepared.reducesTransparency == NSWorkspace.shared.accessibilityDisplayShouldReduceTransparency {
+            prepared.panel
+        } else {
+            BlurPanel(effect: effect)
         }
+        panels[display] = panel
+        return panel
     }
 
     private func backgroundWindows(
@@ -223,13 +245,13 @@ final class FocusController: NSObject {
     }
 
     private func hidePanels() {
-        for panel in panels.values where panel.isVisible { panel.orderOut(nil) }
+        for panel in panels.values where panel.isVisible { panel.hideImmediately() }
     }
 
     private func removePanels(except displays: Set<CGDirectDisplayID>) {
         let obsolete = panels.keys.filter { !displays.contains($0) }
         for id in obsolete {
-            panels.removeValue(forKey: id)?.orderOut(nil)
+            panels.removeValue(forKey: id)?.hideImmediately()
         }
     }
 }

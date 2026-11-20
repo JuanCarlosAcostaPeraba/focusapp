@@ -80,6 +80,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         updateTimer = Timer.publish(every: 86_400, tolerance: 60, on: .main, in: .common)
             .autoconnect()
             .sink { [weak self] _ in self?.updater.check(automatically: true) }
+        DispatchQueue.main.async { [weak self] in self?.focus.prepareInitialPanel() }
         updater.check(automatically: true)
     }
 

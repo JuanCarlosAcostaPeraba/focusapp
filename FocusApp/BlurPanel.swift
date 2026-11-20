@@ -9,9 +9,18 @@ final class BlurPanel: NSPanel {
     private let focusMask = CAShapeLayer()
     private var previousBackground: [BackgroundWindow] = []
     private var previousMaskBounds = CGRect.null
+    private var fadeTimer: Timer?
+    private var fade: Fade?
+
+    private struct Fade {
+        let start: CGFloat
+        let target: CGFloat
+        var startedAt: TimeInterval?
+        var duration: TimeInterval { 0.22 * abs(target - start) }
+    }
 
     static var supportsMonochrome: Bool {
-        BackdropFilters.make()?.saturation != nil
+        BackdropFilters.make()?.supportsSaturation == true
     }
 
     override var canBecomeKey: Bool { false }
@@ -68,7 +77,7 @@ final class BlurPanel: NSPanel {
         CATransaction.setDisableActions(true)
         backdrop?.apply(effect)
         fallback.alphaValue = min(effect.blur * 3.12, 1)
-        texture.alphaValue = effect.grain
+        texture.layer?.opacity = Float(effect.grain)
         tint.backgroundColor = effect.tintColor.withAlphaComponent(effect.dimming).cgColor
         CATransaction.commit()
     }
@@ -92,19 +101,76 @@ final class BlurPanel: NSPanel {
         CATransaction.commit()
     }
 
-    func place(_ mode: NSWindow.OrderingMode, relativeTo windowNumber: Int) {
-        // Keep the material steady while the panel moves between windows.
-        let fadeIn = !isVisible && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
-        if fadeIn {
+    func prepare(for frame: CGRect) {
+        alphaValue = 0
+        setFrame(frame, display: false)
+        contentView?.layoutSubtreeIfNeeded()
+        display()
+    }
+
+    func present(_ mode: NSWindow.OrderingMode, relativeTo windowNumber: Int, needsPlacement: Bool) {
+        let wasVisible = isVisible
+        if !wasVisible {
             alphaValue = 0
         }
-        order(mode, relativeTo: windowNumber)
-        if fadeIn {
-            NSAnimationContext.runAnimationGroup { context in
-                context.duration = 0.18
-                context.timingFunction = CAMediaTimingFunction(name: .easeOut)
-                animator().alphaValue = 1
-            }
+        if !wasVisible || needsPlacement {
+            order(mode, relativeTo: windowNumber)
+        }
+        if !wasVisible || fade?.target == 0 {
+            startFade(to: 1)
+        }
+    }
+
+    func dismiss() {
+        if isVisible && fade?.target != 0 {
+            startFade(to: 0)
+        }
+    }
+
+    func hideImmediately() {
+        stopFade()
+        alphaValue = 0
+        orderOut(nil)
+    }
+
+    private func stopFade() {
+        fadeTimer?.invalidate()
+        fadeTimer = nil
+        fade = nil
+    }
+
+    private func startFade(to target: CGFloat) {
+        stopFade()
+        let start = alphaValue
+        if start == target || NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
+            alphaValue = target
+            if target == 0 { orderOut(nil) }
+            return
+        }
+
+        fade = Fade(start: start, target: target)
+        let timer = Timer(
+            timeInterval: 1.0 / 60, target: self, selector: #selector(advanceFade(_:)),
+            userInfo: nil, repeats: true
+        )
+        // Status menus and mouse tracking can run outside the default run loop mode.
+        timer.fireDate = .now
+        fadeTimer = timer
+        RunLoop.main.add(timer, forMode: .common)
+    }
+
+    @objc private func advanceFade(_ timer: Timer) {
+        guard let fade else { return }
+        let now = ProcessInfo.processInfo.systemUptime
+        // The first callback can be delayed while the backdrop is ordered and rendered.
+        let startedAt = fade.startedAt ?? now
+        if fade.startedAt == nil { self.fade?.startedAt = startedAt }
+        let progress = min((now - startedAt) / fade.duration, 1)
+        let eased = progress * progress * (3 - 2 * progress)
+        alphaValue = fade.start + (fade.target - fade.start) * eased
+        if progress == 1 {
+            stopFade()
+            if fade.target == 0 { orderOut(nil) }
         }
     }
 }
@@ -131,32 +197,47 @@ struct BackgroundWindow: Equatable {
 }
 
 @MainActor
-private struct BackdropFilters {
+private final class BackdropFilters {
     let layer: CALayer
-    let blur: NSObject
-    let saturation: NSObject?
+    let supportsSaturation: Bool
+    private let filterType: NSObject.Type
+    private var lastBlur: Double?
+    private var lastMonochrome: Double?
 
-    static func make() -> Self? {
+    private init(layer: CALayer, filterType: NSObject.Type, supportsSaturation: Bool) {
+        self.layer = layer
+        self.filterType = filterType
+        self.supportsSaturation = supportsSaturation
+    }
+
+    static func make() -> BackdropFilters? {
         guard !NSWorkspace.shared.accessibilityDisplayShouldReduceTransparency,
               let backdropType = NSClassFromString("CABackdropLayer") as? CALayer.Type,
               let filterType = NSClassFromString("CAFilter") as? NSObject.Type,
-              let blur = filter("gaussianBlur", key: "inputRadius", type: filterType) else { return nil }
+              filter("gaussianBlur", key: "inputRadius", type: filterType) != nil else { return nil }
 
         let layer = backdropType.init()
         guard layer.responds(to: NSSelectorFromString("setWindowServerAware:")) else { return nil }
         layer.setValue(true, forKey: "windowServerAware")
-        return Self(layer: layer, blur: blur, saturation: filter(
-            "colorSaturate", key: "inputAmount", type: filterType
-        ))
+        return BackdropFilters(
+            layer: layer, filterType: filterType,
+            supportsSaturation: filter("colorSaturate", key: "inputAmount", type: filterType) != nil
+        )
     }
 
     func apply(_ effect: EffectSettings) {
+        guard effect.blur != lastBlur || effect.monochrome != lastMonochrome else { return }
+        lastBlur = effect.blur
+        lastMonochrome = effect.monochrome
+
+        // Replace the filters so Core Animation submits the new values to the compositor.
         var filters: [NSObject] = []
-        if effect.blur > 0 {
+        if effect.blur > 0, let blur = Self.filter("gaussianBlur", key: "inputRadius", type: filterType) {
             blur.setValue(effect.blur * 48, forKey: "inputRadius")
             filters.append(blur)
         }
-        if let saturation, effect.monochrome > 0 {
+        if supportsSaturation, effect.monochrome > 0,
+           let saturation = Self.filter("colorSaturate", key: "inputAmount", type: filterType) {
             saturation.setValue(1 - effect.monochrome, forKey: "inputAmount")
             filters.append(saturation)
         }

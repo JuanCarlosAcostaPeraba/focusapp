@@ -234,6 +234,15 @@ final class EffectPreferences: ObservableObject {
 }
 
 struct PreferencesView: View {
+    private enum SettingsPage: String, CaseIterable {
+        case appearance = "Aspecto"
+        case activation = "Activación"
+        case exclusions = "Exclusiones"
+        case groups = "Grupos"
+        case updates = "Actualizaciones"
+    }
+
+    @State private var section: SettingsPage = .appearance
     @ObservedObject var preferences: EffectPreferences
     @ObservedObject var activation: ActivationControls
     let updater: AppUpdater
@@ -242,15 +251,45 @@ struct PreferencesView: View {
     let onChooseApplications: (ApplicationDestination) -> Void
 
     var body: some View {
-        TabView {
-            appearance.tabItem { Label("Aspecto", systemImage: "slider.horizontal.3") }
-            activationSettings.tabItem { Label("Activación", systemImage: "bolt") }
-            exclusions.tabItem { Label("Exclusiones", systemImage: "eye") }
-            groups.tabItem { Label("Grupos", systemImage: "square.stack") }
-            UpdateSettingsView(updater: updater)
-                .tabItem { Label("Actualizaciones", systemImage: "arrow.down.circle") }
+        VStack(spacing: 0) {
+            HStack(spacing: 4) {
+                ForEach(SettingsPage.allCases, id: \.self) { item in
+                    Button {
+                        section = item
+                    } label: {
+                        Text(item.rawValue)
+                            .font(.system(size: 12, weight: section == item ? .semibold : .medium))
+                            .frame(maxWidth: .infinity, minHeight: 28)
+                            .contentShape(Rectangle())
+                            .background {
+                                if section == item {
+                                    RoundedRectangle(cornerRadius: 6).fill(.background)
+                                }
+                            }
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityAddTraits(section == item ? .isSelected : [])
+                }
+            }
+            .padding(3)
+            .background(.quaternary, in: RoundedRectangle(cornerRadius: 9))
+            .padding(.horizontal, 20)
+            .padding(.vertical, 14)
+
+            Divider()
+
+            Group {
+                switch section {
+                case .appearance: appearance
+                case .activation: activationSettings
+                case .exclusions: exclusions
+                case .groups: groups
+                case .updates: UpdateSettingsView(updater: updater)
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
-        .frame(width: 490, height: 503)
+        .frame(width: 540, height: 578)
     }
 
     private var exclusions: some View {
@@ -443,14 +482,51 @@ struct PreferencesView: View {
     private func slider(_ label: String, value: Binding<Double>, max: Double = 1) -> some View {
         LabeledContent(label) {
             HStack(spacing: 10) {
-                Slider(value: value, in: 0...max)
-                    .accessibilityLabel(label)
+                ContinuousEffectSlider(value: value, maximum: max, label: label)
                     .frame(width: 176)
                 Text(value.wrappedValue.formatted(.percent.precision(.fractionLength(0))))
                     .monospacedDigit()
                     .foregroundStyle(.secondary)
                     .frame(width: 42, alignment: .trailing)
                     .accessibilityHidden(true)
+            }
+        }
+    }
+}
+
+private struct ContinuousEffectSlider: NSViewRepresentable {
+    @Binding var value: Double
+    let maximum: Double
+    let label: String
+
+    func makeNSView(context: Context) -> NSSlider {
+        let slider = NSSlider(value: value, minValue: 0, maxValue: maximum,
+                              target: context.coordinator, action: #selector(Coordinator.changed(_:)))
+        slider.isContinuous = true
+        slider.setAccessibilityLabel(label)
+        return slider
+    }
+
+    func updateNSView(_ slider: NSSlider, context: Context) {
+        context.coordinator.value = $value
+        if slider.doubleValue != value {
+            slider.doubleValue = value
+        }
+    }
+
+    func makeCoordinator() -> Coordinator { Coordinator(value: $value) }
+
+    @MainActor
+    final class Coordinator: NSObject {
+        var value: Binding<Double>
+
+        init(value: Binding<Double>) { self.value = value }
+
+        @objc func changed(_ sender: NSSlider) {
+            value.wrappedValue = sender.doubleValue
+            if RunLoop.current.currentMode == .eventTracking {
+                // AppKit tracks the drag in a nested run loop. Submit the backdrop update there.
+                CATransaction.flush()
             }
         }
     }
