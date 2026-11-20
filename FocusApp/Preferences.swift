@@ -82,7 +82,7 @@ struct EffectSettings: Codable, Equatable {
     var blur = 0.25
     var monochrome = 0.0
     var dimming = 0.0
-    var grain = 0.30
+    var grain = 0.50
     var tint: TintColor = .black
     var customTint: UInt32 = 0x688BEE
 
