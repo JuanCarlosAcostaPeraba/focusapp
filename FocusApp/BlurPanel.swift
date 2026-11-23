@@ -3,13 +3,15 @@ import AppKit
 @MainActor
 final class BlurPanel: NSPanel {
     private let backdrop = BackdropFilters.make()
-    private let fallback = NSVisualEffectView()
+    private lazy var fallback = NSVisualEffectView()
     private let texture = GrainView()
     private let focusMask = CAShapeLayer()
     private var previousBackground: [BackgroundWindow] = []
     private var previousMaskBounds = CGRect.null
+    private var maskIsEmpty = false
     private var fadeTimer: Timer?
     private var fade: Fade?
+    private var onDismiss: (() -> Void)?
 
     private struct Fade {
         let start: CGFloat
@@ -68,8 +70,12 @@ final class BlurPanel: NSPanel {
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         backdrop?.apply(blur: effect.blur)
-        fallback.alphaValue = min(effect.blur * 3.12, 1)
-        texture.layer?.opacity = Float(effect.grain)
+        if backdrop == nil {
+            fallback.alphaValue = min(effect.blur * 3.12, 1)
+            fallback.isHidden = effect.blur <= 0
+        }
+        texture.isHidden = effect.grain <= 0
+        texture.intensity = Float(effect.grain)
         CATransaction.commit()
     }
 
@@ -80,9 +86,13 @@ final class BlurPanel: NSPanel {
         previousBackground = windows
         previousMaskBounds = bounds
 
+        let path = BackgroundWindow.effectMask(for: windows, in: bounds)
+        maskIsEmpty = path?.isEmpty == true
+        guard !maskIsEmpty else { return }
+
         CATransaction.begin()
         CATransaction.setDisableActions(true)
-        if let path = BackgroundWindow.effectMask(for: windows, in: bounds) {
+        if let path {
             focusMask.frame = bounds
             focusMask.path = path
             contentView.layer?.mask = focusMask
@@ -92,14 +102,12 @@ final class BlurPanel: NSPanel {
         CATransaction.commit()
     }
 
-    func prepare(for frame: CGRect) {
-        alphaValue = 0
-        setFrame(frame, display: false)
-        contentView?.layoutSubtreeIfNeeded()
-        display()
-    }
-
     func present(_ mode: NSWindow.OrderingMode, relativeTo windowNumber: Int, needsPlacement: Bool) {
+        // Fully protected displays have no pixels for the compositor to blur.
+        if maskIsEmpty {
+            if isVisible { hideImmediately() }
+            return
+        }
         let wasVisible = isVisible
         if !wasVisible {
             alphaValue = 0
@@ -112,10 +120,13 @@ final class BlurPanel: NSPanel {
         }
     }
 
-    func dismiss() {
-        if isVisible && fade?.target != 0 {
-            startFade(to: 0)
+    func dismiss(completion: @escaping () -> Void) {
+        guard isVisible else {
+            completion()
+            return
         }
+        if fade?.target != 0 { startFade(to: 0) }
+        if fade == nil { completion() } else { onDismiss = completion }
     }
 
     func hideImmediately() {
@@ -128,6 +139,7 @@ final class BlurPanel: NSPanel {
         fadeTimer?.invalidate()
         fadeTimer = nil
         fade = nil
+        onDismiss = nil
     }
 
     private func startFade(to target: CGFloat) {
@@ -160,8 +172,12 @@ final class BlurPanel: NSPanel {
         let eased = progress * progress * (3 - 2 * progress)
         alphaValue = fade.start + (fade.target - fade.start) * eased
         if progress == 1 {
+            let completion = onDismiss
             stopFade()
-            if fade.target == 0 { orderOut(nil) }
+            if fade.target == 0 {
+                orderOut(nil)
+                completion?()
+            }
         }
     }
 }
@@ -244,25 +260,142 @@ private final class BackdropFilters {
 
 @MainActor
 private final class GrainView: NSView {
-    private static let grain = makeGrain()
+    private var renderer: NSView?
 
-    override func draw(_ dirtyRect: NSRect) {
-        guard let grain = Self.grain else { return }
-        grain.setFill()
-        dirtyRect.fill()
+    var intensity: Float = 0 {
+        didSet {
+            if oldValue == 0 { updateRenderer() }
+            renderer?.layer?.opacity = intensity
+        }
     }
 
-    private static func makeGrain() -> NSColor? {
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        updateRenderer()
+    }
+
+    override func viewDidChangeBackingProperties() {
+        super.viewDidChangeBackingProperties()
+        updateRenderer()
+    }
+
+    private func updateRenderer() {
+        guard intensity > 0, let window else { return }
+        let usesTiles = window.backingScaleFactor == 2 && GrainTexture.repeatedImage != nil
+        if let renderer, (renderer is TiledGrainView) == usesTiles { return }
+
+        renderer?.removeFromSuperview()
+        let view: NSView = usesTiles ? TiledGrainView(frame: bounds) : PatternGrainView(frame: bounds)
+        view.wantsLayer = true
+        view.layer?.opacity = intensity
+        view.autoresizingMask = [.width, .height]
+        renderer = view
+        addSubview(view)
+    }
+}
+
+@MainActor
+private final class PatternGrainView: NSView {
+    override func draw(_ dirtyRect: NSRect) {
+        guard let pattern = GrainTexture.pattern else { return }
+        pattern.setFill()
+        dirtyRect.fill()
+    }
+}
+
+@MainActor
+private final class TiledGrainView: NSView {
+    private static let tileLength = CGFloat(GrainTexture.tilePixels * GrainTexture.repetitions) / 2
+    private let rows = CAReplicatorLayer()
+    private let columns = CAReplicatorLayer()
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        rows.masksToBounds = true
+        // The copies do not overlap, so each can blend at the requested opacity.
+        rows.allowsGroupOpacity = false
+        columns.allowsGroupOpacity = false
+        rows.addSublayer(columns)
+        layer = rows
+        wantsLayer = true
+
+        let tile = CALayer()
+        tile.contents = GrainTexture.repeatedImage
+        tile.contentsScale = 2
+        let length = Self.tileLength
+        tile.frame = CGRect(x: 0, y: 0, width: length, height: length)
+        columns.addSublayer(tile)
+        columns.instanceTransform = CATransform3DMakeTranslation(length, 0, 0)
+        rows.instanceTransform = CATransform3DMakeTranslation(0, length, 0)
+        updateTiles()
+    }
+
+    required init?(coder: NSCoder) { nil }
+
+    override func setFrameSize(_ newSize: NSSize) {
+        super.setFrameSize(newSize)
+        updateTiles()
+    }
+
+    private func updateTiles() {
+        let length = Self.tileLength
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        rows.frame = frame
+        columns.frame = CGRect(x: 0, y: 0, width: bounds.width, height: length)
+        columns.instanceCount = max(1, Int(ceil(bounds.width / length)))
+        rows.instanceCount = max(1, Int(ceil(bounds.height / length)))
+        CATransaction.commit()
+    }
+}
+
+@MainActor
+private enum GrainTexture {
+    static let tilePixels = 128
+    static let repetitions = 4
+
+    private static let bitmap = makeBitmap()
+    static let pattern: NSColor? = {
+        guard let bitmap else { return nil }
+        let image = NSImage(size: bitmap.size)
+        image.addRepresentation(bitmap)
+        return NSColor(patternImage: image)
+    }()
+
+    // Repeat the unchanged pattern inside a larger image to reduce the number of copies.
+    static let repeatedImage: CGImage? = {
+        guard let bitmap, let pixels = bitmap.bitmapData else { return nil }
+        let size = tilePixels
+        let side = size * repetitions
+        guard let repeated = NSBitmapImageRep(
+            bitmapDataPlanes: nil, pixelsWide: side, pixelsHigh: side,
+            bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+            colorSpaceName: .deviceRGB, bytesPerRow: side * 4, bitsPerPixel: 32
+        ), let output = repeated.bitmapData else { return nil }
+        let tileRowBytes = size * 4
+        for row in 0..<side {
+            let source = pixels.advanced(by: (row % size) * tileRowBytes)
+            for column in 0..<repetitions {
+                output.advanced(by: row * repeated.bytesPerRow + column * tileRowBytes)
+                    .update(from: source, count: tileRowBytes)
+            }
+        }
+        return repeated.cgImage
+    }()
+
+    private static func makeBitmap() -> NSBitmapImageRep? {
         // A reusable transparent tile, generated independently of the backdrop.
-        let size = 128
+        let size = tilePixels
         guard let bitmap = NSBitmapImageRep(
             bitmapDataPlanes: nil, pixelsWide: size, pixelsHigh: size,
             bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
             colorSpaceName: .deviceRGB, bytesPerRow: size * 4, bitsPerPixel: 32
         ), let pixels = bitmap.bitmapData else { return nil }
+        var random = SystemRandomNumberGenerator()
         for index in 0..<(size * size) {
-            let alpha = UInt8.random(in: 0...33)
-            let shade = Bool.random() ? alpha : 0
+            let sample = UInt8.random(in: 0..<68, using: &random)
+            let alpha = sample / 2
+            let shade = sample.isMultiple(of: 2) ? alpha : 0
             let offset = index * 4
             pixels[offset] = shade
             pixels[offset + 1] = shade
@@ -270,8 +403,6 @@ private final class GrainView: NSView {
             pixels[offset + 3] = alpha
         }
         bitmap.size = NSSize(width: size / 2, height: size / 2)
-        let tile = NSImage(size: bitmap.size)
-        tile.addRepresentation(bitmap)
-        return NSColor(patternImage: tile)
+        return bitmap
     }
 }

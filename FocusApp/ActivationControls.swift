@@ -63,8 +63,10 @@ final class ActivationControls: NSObject, ObservableObject {
     private var hotKey: EventHotKeyRef?
     private var hotKeyIsDown = false
     private var keyMonitor: Any?
-    private var shakeTimer: Timer?
+    private var globalShakeMonitor: Any?
+    private var localShakeMonitor: Any?
     private var shake = CursorShake()
+    private var lastShakeSample = -Double.infinity
 
     @Published private var shortcut: ToggleShortcut?
     @Published private(set) var isRecording = false
@@ -72,13 +74,13 @@ final class ActivationControls: NSObject, ObservableObject {
     @Published var shakeEnabled: Bool {
         didSet {
             defaults.set(shakeEnabled, forKey: Self.shakeEnabledKey)
-            updateShakeTimer()
+            updateShakeMonitors()
         }
     }
     @Published var shakeSensitivity: ShakeSensitivity {
         didSet {
             defaults.set(shakeSensitivity.rawValue, forKey: Self.shakeSensitivityKey)
-            shake = CursorShake()
+            resetShake()
         }
     }
 
@@ -99,7 +101,7 @@ final class ActivationControls: NSObject, ObservableObject {
     func start(onToggle: @escaping () -> Void) {
         self.onToggle = onToggle
         registerSavedShortcut()
-        updateShakeTimer()
+        updateShakeMonitors()
     }
 
     func stop() {
@@ -110,7 +112,7 @@ final class ActivationControls: NSObject, ObservableObject {
             RemoveEventHandler(handler)
             self.handler = nil
         }
-        updateShakeTimer()
+        updateShakeMonitors()
     }
 
     func beginRecording() {
@@ -223,20 +225,39 @@ final class ActivationControls: NSObject, ObservableObject {
             : "macOS no pudo registrar ese atajo. Prueba otra combinación."
     }
 
-    private func updateShakeTimer() {
-        shakeTimer?.invalidate()
-        shakeTimer = nil
-        shake = CursorShake()
+    private func updateShakeMonitors() {
+        if let globalShakeMonitor { NSEvent.removeMonitor(globalShakeMonitor) }
+        if let localShakeMonitor { NSEvent.removeMonitor(localShakeMonitor) }
+        globalShakeMonitor = nil
+        localShakeMonitor = nil
+        resetShake()
         guard shakeEnabled, onToggle != nil else { return }
-        let timer = Timer(timeInterval: 0.025, target: self, selector: #selector(pollCursor(_:)), userInfo: nil, repeats: true)
-        timer.tolerance = 0.005
-        shakeTimer = timer
-        RunLoop.main.add(timer, forMode: .common)
+        let events: NSEvent.EventTypeMask = [.mouseMoved, .leftMouseDown, .rightMouseDown, .otherMouseDown]
+        globalShakeMonitor = NSEvent.addGlobalMonitorForEvents(matching: events) { [weak self] event in
+            MainActor.assumeIsolated { self?.handleShakeEvent(event) }
+        }
+        localShakeMonitor = NSEvent.addLocalMonitorForEvents(matching: events) { [weak self] event in
+            self?.handleShakeEvent(event)
+            return event
+        }
     }
 
-    @objc private func pollCursor(_ timer: Timer) {
+    private func resetShake() {
+        shake = CursorShake()
+        lastShakeSample = -.infinity
+    }
+
+    private func handleShakeEvent(_ event: NSEvent) {
+        guard event.type == .mouseMoved else {
+            resetShake()
+            return
+        }
+        let now = event.timestamp
+        guard now - lastShakeSample >= 0.025 else { return }
+        lastShakeSample = now
+        let position = event.window?.convertPoint(toScreen: event.locationInWindow) ?? event.locationInWindow
         if shake.sample(
-            NSEvent.mouseLocation, at: ProcessInfo.processInfo.systemUptime,
+            position, at: now,
             dragging: NSEvent.pressedMouseButtons != 0, sensitivity: shakeSensitivity
         ), !isRecording {
             onToggle?()

@@ -5,15 +5,28 @@ import CoreGraphics
 final class FocusController: NSObject {
     private var timer: Timer?
     private var panels: [CGDirectDisplayID: BlurPanel] = [:]
-    private var preparedPanel: (panel: BlurPanel, reducesTransparency: Bool)?
+    private var displays: [FocusDisplay] = []
+    private var screenIsAwake = true
+    private var fastPollingUntil = 0.0
+    private var globalClickMonitor: Any?
+    private var localClickMonitor: Any?
+    private var runningAppsObserver: NSKeyValueObservation?
+    private var frontmostApp: (pid: pid_t, bundleIdentifier: String?)?
+    private var ownersByBundle: [String: Set<pid_t>] = [:]
+    private var previousWindows: [WindowInfo]?
     private var lastFocusedWindowID: Int?
     private var stageManager = StageManagerStrip(enabled: false, onRight: false)
     private var nextStageManagerCheck = 0.0
     private let ownPID = ProcessInfo.processInfo.processIdentifier
 
-    var isEnabled: Bool { timer != nil }
+    private(set) var isEnabled = false
+    private var hasVisibleEffect: Bool { effect.blur > 0 || effect.grain > 0 }
 
-    var preferencesWindowNumber: Int?
+    var preferencesWindowNumber: Int? {
+        didSet {
+            if preferencesWindowNumber != oldValue { refreshFocus() }
+        }
+    }
 
     var scope: FocusScope = .window {
         didSet {
@@ -47,100 +60,181 @@ final class FocusController: NSObject {
 
     var effect = EffectSettings.subtle {
         didSet {
-            preparedPanel?.panel.apply(effect)
+            guard effect != oldValue else { return }
             for panel in panels.values { panel.apply(effect) }
+            if isEnabled, hasVisibleEffect != (oldValue.blur > 0 || oldValue.grain > 0) {
+                updateTracking()
+            }
         }
-    }
-
-    func prepareInitialPanel() {
-        guard !isEnabled, panels.isEmpty, let screen = NSScreen.main else { return }
-        // Prepare one hidden panel for whichever display needs the effect first.
-        let reducesTransparency = NSWorkspace.shared.accessibilityDisplayShouldReduceTransparency
-        let panel = BlurPanel(effect: effect)
-        panel.prepare(for: screen.frame)
-        preparedPanel = (panel, reducesTransparency)
     }
 
     func setEnabled(_ enabled: Bool) {
         guard enabled != isEnabled else { return }
+        isEnabled = enabled
         if enabled {
-            nextStageManagerCheck = 0
             let workspace = NSWorkspace.shared.notificationCenter
-            workspace.addObserver(
-                self, selector: #selector(workspaceChanged(_:)),
-                name: NSWorkspace.didActivateApplicationNotification, object: nil
-            )
-            workspace.addObserver(
-                self, selector: #selector(workspaceChanged(_:)),
-                name: NSWorkspace.activeSpaceDidChangeNotification, object: nil
-            )
+            for name in [NSWorkspace.didActivateApplicationNotification, NSWorkspace.activeSpaceDidChangeNotification,
+                         NSWorkspace.screensDidSleepNotification, NSWorkspace.screensDidWakeNotification,
+                         NSWorkspace.accessibilityDisplayOptionsDidChangeNotification] {
+                workspace.addObserver(self, selector: #selector(workspaceChanged(_:)), name: name, object: nil)
+            }
             NotificationCenter.default.addObserver(
                 self, selector: #selector(workspaceChanged(_:)),
                 name: NSApplication.didChangeScreenParametersNotification, object: nil
             )
-            // App activation alone misses changes between windows of the same app.
-            let timer = Timer(
-                timeInterval: 0.15, target: self, selector: #selector(pollFocus(_:)),
-                userInfo: nil, repeats: true
-            )
-            timer.tolerance = 0.03
-            self.timer = timer
-            RunLoop.main.add(timer, forMode: .common)
-            refreshFocus()
+            updateTracking()
         } else {
-            timer?.invalidate()
-            timer = nil
+            stopTracking()
             NSWorkspace.shared.notificationCenter.removeObserver(self)
             NotificationCenter.default.removeObserver(self)
-            for panel in panels.values { panel.dismiss() }
+            for (id, panel) in panels {
+                panel.dismiss { [weak self, weak panel] in
+                    guard let self, let panel, self.panels[id] === panel else { return }
+                    self.panels.removeValue(forKey: id)
+                }
+            }
             lastFocusedWindowID = nil
+            screenIsAwake = true
         }
+    }
+
+    private func updateTracking() {
+        guard isEnabled, hasVisibleEffect, screenIsAwake else {
+            stopTracking()
+            removePanels(except: [])
+            return
+        }
+        displays = FocusDisplay.current
+        if runningAppsObserver == nil {
+            // This also covers apps without a Dock icon.
+            runningAppsObserver = NSWorkspace.shared.observe(\.runningApplications) { [weak self] _, _ in
+                MainActor.assumeIsolated { self?.runningAppsChanged() }
+            }
+            let clicks: NSEvent.EventTypeMask = [.leftMouseDown, .leftMouseUp, .rightMouseUp, .otherMouseUp]
+            globalClickMonitor = NSEvent.addGlobalMonitorForEvents(matching: clicks) { [weak self] _ in
+                MainActor.assumeIsolated { self?.clicked() }
+            }
+            localClickMonitor = NSEvent.addLocalMonitorForEvents(matching: clicks) { [weak self] event in
+                self?.clicked()
+                return event
+            }
+        }
+        nextStageManagerCheck = 0
+        refreshFocus()
+    }
+
+    private func stopTracking() {
+        timer?.invalidate()
+        timer = nil
+        if let globalClickMonitor { NSEvent.removeMonitor(globalClickMonitor) }
+        if let localClickMonitor { NSEvent.removeMonitor(localClickMonitor) }
+        globalClickMonitor = nil
+        localClickMonitor = nil
+        runningAppsObserver = nil
+        frontmostApp = nil
+        ownersByBundle.removeAll()
+        displays = []
+        previousWindows = nil
+    }
+
+    private func runningAppsChanged() {
+        frontmostApp = nil
+        ownersByBundle.removeAll()
+        previousWindows = nil
     }
 
     @objc private func workspaceChanged(_ notification: Notification) {
-        if notification.name == NSWorkspace.activeSpaceDidChangeNotification ||
-            notification.name == NSApplication.didChangeScreenParametersNotification {
+        switch notification.name {
+        case NSWorkspace.screensDidSleepNotification, NSWorkspace.screensDidWakeNotification:
+            screenIsAwake = notification.name == NSWorkspace.screensDidWakeNotification
+            updateTracking()
+        case NSWorkspace.activeSpaceDidChangeNotification, NSWorkspace.accessibilityDisplayOptionsDidChangeNotification,
+             NSApplication.didChangeScreenParametersNotification:
             removePanels(except: [])
+            updateTracking()
+        default:
+            frontmostApp = nil
+            refreshFocus()
         }
-        refreshFocus()
     }
 
-    @objc private func pollFocus(_ timer: Timer) {
-        refreshFocus()
+    private func clicked() {
+        fastPollingUntil = ProcessInfo.processInfo.systemUptime + 0.6
+        schedulePoll(after: 0.06)
+    }
+
+    private func schedulePoll(after delay: TimeInterval) {
+        let date = Date(timeIntervalSinceNow: delay)
+        if let timer, timer.fireDate <= date { return }
+        timer?.invalidate()
+        let timer = Timer(fireAt: date, interval: 0, target: self, selector: #selector(pollFocus(_:)),
+                          userInfo: nil, repeats: false)
+        timer.tolerance = delay * 0.15
+        self.timer = timer
+        RunLoop.main.add(timer, forMode: .common)
     }
 
     private func refreshFocus() {
-        guard isEnabled else { return }
+        guard isEnabled, hasVisibleEffect, screenIsAwake else { return }
+        previousWindows = nil
+        pollFocus()
+    }
+
+    @objc private func pollFocus(_ firedTimer: Timer) {
+        guard firedTimer === timer else { return }
+        timer = nil
+        pollFocus()
+    }
+
+    private func pollFocus() {
+        let now = ProcessInfo.processInfo.systemUptime
+        if readStageManager(at: now) { previousWindows = nil }
+        if reconcileWindows() { fastPollingUntil = now + 0.6 }
+        // Quartz has no notification for window changes within another app.
+        schedulePoll(after: now < fastPollingUntil ? 0.15 : 0.45)
+    }
+
+    private func reconcileWindows() -> Bool {
         guard let app = NSWorkspace.shared.frontmostApplication,
               let snapshot = CGWindowListCopyWindowInfo(
                 [.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID
               ) as? [[String: Any]] else {
-            hidePanels()
-            return
+            previousWindows = nil
+            removePanels(except: [])
+            return false
         }
 
-        let visibleWindows = snapshot.compactMap(WindowInfo.init)
+        let pid = app.processIdentifier
+        if frontmostApp?.pid != pid {
+            frontmostApp = (pid, app.bundleIdentifier)
+            previousWindows = nil
+        }
+        let bundleID = frontmostApp?.bundleIdentifier
+        let group = bundleID.flatMap { groupMembersByApplication[$0] } ?? []
+        let visibleWindows = snapshot.compactMap {
+            WindowInfo($0, floatingOwner: group.isEmpty ? nil : pid, includeStageManager: stageManager.enabled)
+        }
+        guard visibleWindows != previousWindows else { return false }
+        previousWindows = visibleWindows
         let windows = visibleWindows.filter { $0.layer == 0 }
-        let displays = FocusDisplay.current
-        let stageWindows = stageManagerWindows(in: windows, displays: displays)
-        let group = app.bundleIdentifier.flatMap { groupMembersByApplication[$0] } ?? []
+        let stageWindows = stageManager.windowIDs(in: windows, displays: displays)
         let active = windows.first {
-            $0.owner == app.processIdentifier &&
+            $0.owner == pid &&
                 ($0.owner != ownPID || $0.id == preferencesWindowNumber) &&
                 $0.isAppWindow && !stageWindows.contains($0.id)
         }
         // A floating group member is already above the normal window stack.
         let floating = active == nil && !group.isEmpty
-            ? visibleWindows.first { $0.owner == app.processIdentifier && $0.isAppWindow && !stageWindows.contains($0.id) }
+            ? visibleWindows.first { $0.owner == pid && $0.isAppWindow && !stageWindows.contains($0.id) }
             : nil
-        let previous = floating == nil && app.bundleIdentifier.map(excludedBundleIdentifiers.contains) == true
+        let previous = floating == nil && bundleID.map(excludedBundleIdentifiers.contains) == true
             ? windows.first { $0.id == lastFocusedWindowID }
             : nil
         let anchor = active ?? previous
         guard let bounds = (anchor ?? floating)?.bounds,
               let activeDisplay = FocusDisplay.containing(bounds, in: displays) else {
-            hidePanels()
-            return
+            removePanels(except: [])
+            return true
         }
 
         if let anchor, anchor.owner != ownPID {
@@ -149,11 +243,14 @@ final class FocusController: NSObject {
 
         let targets = displayScope == .allDisplays ? displays : [activeDisplay]
         removePanels(except: Set(targets.map(\.id)))
-        let clearBundles = excludedBundleIdentifiers.union(group)
-        var clearOwners = Set(NSWorkspace.shared.runningApplications.compactMap { app -> pid_t? in
-            guard let identifier = app.bundleIdentifier, clearBundles.contains(identifier) else { return nil }
-            return app.processIdentifier
-        })
+        var clearOwners: Set<pid_t> = []
+        for bundle in excludedBundleIdentifiers.union(group) {
+            if ownersByBundle[bundle] == nil {
+                ownersByBundle[bundle] = Set(NSRunningApplication.runningApplications(withBundleIdentifier: bundle)
+                    .map(\.processIdentifier))
+            }
+            clearOwners.formUnion(ownersByBundle[bundle, default: []])
+        }
         if scope == .application, let anchor, anchor.owner != ownPID {
             clearOwners.insert(anchor.owner)
         }
@@ -165,6 +262,7 @@ final class FocusController: NSObject {
                 stageWindows: stageWindows
             )
         }
+        return true
     }
 
     private func updatePanel(
@@ -206,14 +304,7 @@ final class FocusController: NSObject {
 
     private func panel(for display: CGDirectDisplayID) -> BlurPanel {
         if let panel = panels[display] { return panel }
-        let prepared = preparedPanel
-        preparedPanel = nil
-        let panel = if let prepared,
-           prepared.reducesTransparency == NSWorkspace.shared.accessibilityDisplayShouldReduceTransparency {
-            prepared.panel
-        } else {
-            BlurPanel(effect: effect)
-        }
+        let panel = BlurPanel(effect: effect)
         panels[display] = panel
         return panel
     }
@@ -235,17 +326,12 @@ final class FocusController: NSObject {
         }
     }
 
-    private func stageManagerWindows(in windows: [WindowInfo], displays: [FocusDisplay]) -> Set<Int> {
-        let now = ProcessInfo.processInfo.systemUptime
-        if now >= nextStageManagerCheck {
-            stageManager = .readSystemPreferences()
-            nextStageManagerCheck = now + 0.75
-        }
-        return stageManager.windowIDs(in: windows, displays: displays)
-    }
-
-    private func hidePanels() {
-        for panel in panels.values where panel.isVisible { panel.hideImmediately() }
+    private func readStageManager(at now: TimeInterval) -> Bool {
+        guard now >= nextStageManagerCheck else { return false }
+        nextStageManagerCheck = now + 0.75
+        let current = StageManagerStrip.readSystemPreferences()
+        defer { stageManager = current }
+        return current != stageManager
     }
 
     private func removePanels(except displays: Set<CGDirectDisplayID>) {
@@ -302,7 +388,7 @@ struct FocusDisplay {
     }
 }
 
-struct WindowInfo {
+struct WindowInfo: Equatable {
     let id: Int
     let owner: pid_t
     let layer: Int
@@ -312,23 +398,24 @@ struct WindowInfo {
 
     var isAppWindow: Bool { bounds.width >= 32 && bounds.height >= 32 }
 
-    init?(_ entry: [String: Any]) {
+    init?(_ entry: [String: Any], floatingOwner: pid_t?, includeStageManager: Bool) {
         guard let layer = entry[kCGWindowLayer as String] as? Int,
+              let owner = entry[kCGWindowOwnerPID as String] as? pid_t,
+              layer == 0 || owner == floatingOwner,
               (entry[kCGWindowAlpha as String] as? Double ?? 1) > 0,
               let id = entry[kCGWindowNumber as String] as? Int,
-              let owner = entry[kCGWindowOwnerPID as String] as? pid_t,
               let dictionary = entry[kCGWindowBounds as String] as? NSDictionary,
               let bounds = CGRect(dictionaryRepresentation: dictionary as CFDictionary) else { return nil }
         self.id = id
         self.owner = owner
         self.layer = layer
-        ownerName = entry[kCGWindowOwnerName as String] as? String
-        name = entry[kCGWindowName as String] as? String
+        ownerName = includeStageManager ? entry[kCGWindowOwnerName as String] as? String : nil
+        name = ownerName == "WindowManager" ? entry[kCGWindowName as String] as? String : nil
         self.bounds = bounds
     }
 }
 
-struct StageManagerStrip {
+struct StageManagerStrip: Equatable {
     let enabled: Bool
     let onRight: Bool
 
