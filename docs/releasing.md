@@ -9,7 +9,7 @@ Usa macOS con Xcode 26 o posterior, [uv](https://docs.astral.sh/uv/getting-start
 3. Compila desde la raíz del repo. El procedimiento verifica que la app contiene las dos arquitecturas y que la etiqueta esperada coincide con su versión.
 
 ```sh
-FOCUSAPP_RELEASE_TAG=v0.1.3 ./scripts/build-dmg.sh
+FOCUSAPP_RELEASE_TAG=v0.1.4 ./scripts/build-dmg.sh
 (cd dist && shasum -a 256 -c FocusApp.dmg.sha256)
 ```
 
@@ -20,7 +20,7 @@ El flujo habitual genera una app con firma ad hoc. Para distribuir con notarizac
 ```sh
 FOCUSAPP_SIGN_IDENTITY='Developer ID Application: NOMBRE (TEAMID)' \
 FOCUSAPP_NOTARY_PROFILE='focusapp-notary' \
-FOCUSAPP_RELEASE_TAG=v0.1.3 \
+FOCUSAPP_RELEASE_TAG=v0.1.4 \
   ./scripts/build-dmg.sh --notarize
 ```
 
@@ -31,10 +31,10 @@ El script firma una copia de la app con Hardened Runtime, firma la imagen, la en
 Valida que el árbol está limpio y que el commit de la versión ya está en la rama remota. Crea la etiqueta sobre ese commit y súbela antes de publicar:
 
 ```sh
-git tag -a v0.1.3 -m "FocusApp 0.1.3"
-git push origin v0.1.3
-gh release create v0.1.3 dist/FocusApp.dmg dist/FocusApp.dmg.sha256 \
-  --verify-tag --title "FocusApp 0.1.3" --notes-file docs/releases/v0.1.3.md
+git tag -a v0.1.4 -m "FocusApp 0.1.4"
+git push origin v0.1.4
+gh release create v0.1.4 dist/FocusApp.dmg dist/FocusApp.dmg.sha256 \
+  --verify-tag --title "FocusApp 0.1.4" --notes-file docs/releases/v0.1.4.md
 ```
 
 Comprueba que GitHub muestra ambos archivos y que el enlace `releases/latest/download/FocusApp.dmg` descarga el instalador correcto. Mantén los nombres `FocusApp.dmg` y `FocusApp.dmg.sha256` en las versiones siguientes.

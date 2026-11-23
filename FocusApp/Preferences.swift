@@ -58,51 +58,12 @@ enum ApplicationDestination {
     case group(UUID)
 }
 
-enum TintColor: String, Codable, CaseIterable, Identifiable {
-    case black, white, accent, custom
-
-    var id: Self { self }
-
-    var title: String {
-        switch self {
-        case .black: "Negro"
-        case .white: "Blanco"
-        case .accent: "Acento del sistema"
-        case .custom: "Personalizado"
-        }
-    }
-}
-
 struct EffectSettings: Codable, Equatable {
-    static let maximumDimming = 0.65
     static let subtle = Self()
-    static let strong = Self(blur: 0.68, monochrome: 0.18, dimming: 0.18, grain: 0.35)
-    static let tintOnly = Self(blur: 0, dimming: 0.25, grain: 0)
+    static let strong = Self(blur: 0.55)
 
     var blur = 0.25
-    var monochrome = 0.0
-    var dimming = 0.0
     var grain = 0.50
-    var tint: TintColor = .black
-    var customTint: UInt32 = 0x688BEE
-
-    var customColor: NSColor {
-        NSColor(
-            srgbRed: CGFloat((customTint >> 16) & 255) / 255,
-            green: CGFloat((customTint >> 8) & 255) / 255,
-            blue: CGFloat(customTint & 255) / 255,
-            alpha: 1
-        )
-    }
-
-    var tintColor: NSColor {
-        switch tint {
-        case .black: .black
-        case .white: .white
-        case .accent: .controlAccentColor
-        case .custom: customColor
-        }
-    }
 }
 
 @MainActor
@@ -114,6 +75,10 @@ final class EffectPreferences: ObservableObject {
     private static let displayScopeKey = "displayScope"
     private static let stageManagerBlurKey = "blurStageManager"
     private let defaults: UserDefaults
+
+    private struct LegacyAppearance: Decodable {
+        let dimming: Double
+    }
 
     @Published var effect: EffectSettings {
         didSet {
@@ -200,18 +165,17 @@ final class EffectPreferences: ObservableObject {
         } ?? []
         if let data = defaults.data(forKey: Self.key),
            let saved = try? JSONDecoder().decode(EffectSettings.self, from: data) {
-            effect = saved
+            // Give older tint-only configurations a visible effect after removing tint.
+            if saved.blur == 0, saved.grain == 0,
+               let legacy = try? JSONDecoder().decode(LegacyAppearance.self, from: data),
+               legacy.dimming > 0 {
+                effect = .subtle
+            } else {
+                effect = saved
+            }
         } else {
-            var initial = EffectSettings.subtle
-            initial.dimming = min(max(defaults.double(forKey: "dimming"), 0), EffectSettings.maximumDimming)
-            effect = initial
+            effect = .subtle
         }
-    }
-
-    func usePreset(_ preset: EffectSettings) {
-        var settings = preset
-        settings.customTint = effect.customTint
-        effect = settings
     }
 
     func addApplications(_ urls: [URL], to destination: ApplicationDestination) {
@@ -246,7 +210,6 @@ struct PreferencesView: View {
     @ObservedObject var preferences: EffectPreferences
     @ObservedObject var activation: ActivationControls
     let updater: AppUpdater
-    let supportsMonochrome: Bool
     let onToggle: () -> Void
     let onChooseApplications: (ApplicationDestination) -> Void
 
@@ -389,33 +352,16 @@ struct PreferencesView: View {
                     }
                 }
                 Toggle("Desenfocar miniaturas de Stage Manager", isOn: $preferences.blurStageManager)
-                Menu("Preajustes") {
-                    Button("Suave") { preferences.usePreset(.subtle) }
-                    Button("Intenso") { preferences.usePreset(.strong) }
-                    Button("Solo tinte") { preferences.usePreset(.tintOnly) }
+                LabeledContent("Preajustes") {
+                    HStack {
+                        Button("Suave") { preferences.effect = .subtle }
+                        Button("Intenso") { preferences.effect = .strong }
+                    }
                 }
             }
             Section("Aspecto del fondo") {
                 slider("Desenfoque", value: $preferences.effect.blur)
-                slider("Monocromo", value: $preferences.effect.monochrome)
-                    .disabled(!supportsMonochrome)
-                if !supportsMonochrome {
-                    Text("El modo de compatibilidad de macOS no ofrece monocromo.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
                 slider("Grano", value: $preferences.effect.grain)
-            }
-            Section("Tinte") {
-                Picker("Color", selection: $preferences.effect.tint) {
-                    ForEach(TintColor.allCases) { tint in
-                        Text(tint.title).tag(tint)
-                    }
-                }
-                if preferences.effect.tint == .custom {
-                    ColorPicker("Color personalizado", selection: customColor, supportsOpacity: false)
-                }
-                slider("Opacidad", value: $preferences.effect.dimming, max: EffectSettings.maximumDimming)
             }
         }
         .formStyle(.grouped)
@@ -463,26 +409,10 @@ struct PreferencesView: View {
         .onDisappear(perform: activation.cancelRecording)
     }
 
-    private var customColor: Binding<Color> {
-        Binding {
-            Color(nsColor: preferences.effect.customColor)
-        } set: { color in
-            guard let rgb = NSColor(color).usingColorSpace(.sRGB) else { return }
-            let r = colorByte(rgb.redComponent)
-            let g = colorByte(rgb.greenComponent)
-            let b = colorByte(rgb.blueComponent)
-            preferences.effect.customTint = (r << 16) | (g << 8) | b
-        }
-    }
-
-    private func colorByte(_ component: CGFloat) -> UInt32 {
-        UInt32((min(max(component, 0), 1) * 255).rounded())
-    }
-
-    private func slider(_ label: String, value: Binding<Double>, max: Double = 1) -> some View {
+    private func slider(_ label: String, value: Binding<Double>) -> some View {
         LabeledContent(label) {
             HStack(spacing: 10) {
-                ContinuousEffectSlider(value: value, maximum: max, label: label)
+                ContinuousEffectSlider(value: value, label: label)
                     .frame(width: 176)
                 Text(value.wrappedValue.formatted(.percent.precision(.fractionLength(0))))
                     .monospacedDigit()
@@ -496,11 +426,10 @@ struct PreferencesView: View {
 
 private struct ContinuousEffectSlider: NSViewRepresentable {
     @Binding var value: Double
-    let maximum: Double
     let label: String
 
     func makeNSView(context: Context) -> NSSlider {
-        let slider = NSSlider(value: value, minValue: 0, maxValue: maximum,
+        let slider = NSSlider(value: value, minValue: 0, maxValue: 1,
                               target: context.coordinator, action: #selector(Coordinator.changed(_:)))
         slider.isContinuous = true
         slider.setAccessibilityLabel(label)

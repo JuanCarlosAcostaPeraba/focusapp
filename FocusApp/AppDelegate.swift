@@ -15,8 +15,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         action: #selector(toggleFocus),
         keyEquivalent: ""
     )
-    private let percentage = NSTextField(labelWithString: "")
-    private var dimmingSlider: NSSlider?
     private var preferencesWindow: NSWindow?
     private var settingsItem: NSMenuItem?
     private var updateTimer: AnyCancellable?
@@ -24,7 +22,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         activation.start { [weak self] in self?.toggleFocus() }
-        let dimming = preferences.effect.dimming
         focus.effect = preferences.effect
         focus.scope = preferences.focusScope
         preferences.onFocusScopeChange = { [weak self] scope in
@@ -46,19 +43,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         preferences.onGroupsChange = { [weak self] groups in
             self?.focus.groupMembersByApplication = groups
         }
-        updatePercentage(dimming)
         preferences.onChange = { [weak self] effect in
             self?.focus.effect = effect
-            self?.updatePercentage(effect.dimming)
-            self?.dimmingSlider?.doubleValue = effect.dimming
         }
 
         toggle.target = self
         let menu = NSMenu()
         menu.autoenablesItems = false
         menu.addItem(toggle)
-        menu.addItem(.separator())
-        menu.addItem(makeDimmingItem(dimming))
         menu.addItem(.separator())
         let settings = menu.addItem(
             withTitle: "Ajustes…",
@@ -108,7 +100,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 preferences: preferences,
                 activation: activation,
                 updater: updater,
-                supportsMonochrome: BlurPanel.supportsMonochrome,
                 onToggle: { [weak self] in self?.toggleFocus() },
                 onChooseApplications: { [weak self] destination in self?.chooseApplications(for: destination) }
             )
@@ -143,55 +134,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
     }
 
-    private func makeDimmingItem(_ dimming: Double) -> NSMenuItem {
-        let heading = NSTextField(labelWithString: "Oscurecimiento")
-        heading.font = .menuFont(ofSize: 0)
-        percentage.font = .monospacedDigitSystemFont(ofSize: 12, weight: .regular)
-        percentage.textColor = .secondaryLabelColor
-
-        let slider = NSSlider(
-            value: dimming,
-            minValue: 0,
-            maxValue: EffectSettings.maximumDimming,
-            target: self,
-            action: #selector(changeDimming(_:))
-        )
-        dimmingSlider = slider
-        slider.isContinuous = true
-        slider.setAccessibilityLabel("Oscurecimiento")
-
-        let controls = NSStackView(views: [slider, percentage])
-        controls.spacing = 10
-        controls.alignment = .centerY
-        let content = NSStackView(views: [heading, controls])
-        content.orientation = .vertical
-        content.alignment = .leading
-        content.spacing = 6
-        content.edgeInsets = NSEdgeInsets(top: 6, left: 15, bottom: 6, right: 15)
-        NSLayoutConstraint.activate([
-            slider.widthAnchor.constraint(equalToConstant: 150),
-            percentage.widthAnchor.constraint(equalToConstant: 34)
-        ])
-        content.setFrameSize(content.fittingSize)
-
-        let item = NSMenuItem()
-        item.view = content
-        return item
-    }
-
     @objc private func toggleFocus() {
         focus.setEnabled(!focus.isEnabled)
         preferences.isEnabled = focus.isEnabled
         toggle.title = focus.isEnabled ? "Desactivar desenfoque" : "Activar desenfoque"
         updateStatusButton()
-    }
-
-    @objc private func changeDimming(_ slider: NSSlider) {
-        preferences.effect.dimming = slider.doubleValue
-    }
-
-    private func updatePercentage(_ value: Double) {
-        percentage.stringValue = "\(Int((value * 100).rounded())) %"
     }
 
     private func updateStatusButton(hasUpdate: Bool? = nil) {

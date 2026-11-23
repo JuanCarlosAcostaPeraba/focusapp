@@ -5,7 +5,6 @@ final class BlurPanel: NSPanel {
     private let backdrop = BackdropFilters.make()
     private let fallback = NSVisualEffectView()
     private let texture = GrainView()
-    private let tint = CALayer()
     private let focusMask = CAShapeLayer()
     private var previousBackground: [BackgroundWindow] = []
     private var previousMaskBounds = CGRect.null
@@ -17,10 +16,6 @@ final class BlurPanel: NSPanel {
         let target: CGFloat
         var startedAt: TimeInterval?
         var duration: TimeInterval { 0.22 * abs(target - start) }
-    }
-
-    static var supportsMonochrome: Bool {
-        BackdropFilters.make()?.supportsSaturation == true
     }
 
     override var canBecomeKey: Bool { false }
@@ -60,10 +55,7 @@ final class BlurPanel: NSPanel {
         }
 
         texture.wantsLayer = true
-        let tintView = NSView()
-        tintView.layer = tint
-        tintView.wantsLayer = true
-        for view in [effectView, texture, tintView] {
+        for view in [effectView, texture] {
             view.frame = container.bounds
             view.autoresizingMask = [.width, .height]
             container.addSubview(view)
@@ -75,10 +67,9 @@ final class BlurPanel: NSPanel {
     func apply(_ effect: EffectSettings) {
         CATransaction.begin()
         CATransaction.setDisableActions(true)
-        backdrop?.apply(effect)
+        backdrop?.apply(blur: effect.blur)
         fallback.alphaValue = min(effect.blur * 3.12, 1)
         texture.layer?.opacity = Float(effect.grain)
-        tint.backgroundColor = effect.tintColor.withAlphaComponent(effect.dimming).cgColor
         CATransaction.commit()
     }
 
@@ -199,15 +190,12 @@ struct BackgroundWindow: Equatable {
 @MainActor
 private final class BackdropFilters {
     let layer: CALayer
-    let supportsSaturation: Bool
     private let filterType: NSObject.Type
     private var lastBlur: Double?
-    private var lastMonochrome: Double?
 
-    private init(layer: CALayer, filterType: NSObject.Type, supportsSaturation: Bool) {
+    private init(layer: CALayer, filterType: NSObject.Type) {
         self.layer = layer
         self.filterType = filterType
-        self.supportsSaturation = supportsSaturation
     }
 
     static func make() -> BackdropFilters? {
@@ -219,31 +207,28 @@ private final class BackdropFilters {
         let layer = backdropType.init()
         guard layer.responds(to: NSSelectorFromString("setWindowServerAware:")) else { return nil }
         layer.setValue(true, forKey: "windowServerAware")
-        return BackdropFilters(
-            layer: layer, filterType: filterType,
-            supportsSaturation: filter("colorSaturate", key: "inputAmount", type: filterType) != nil
-        )
+        return BackdropFilters(layer: layer, filterType: filterType)
     }
 
-    func apply(_ effect: EffectSettings) {
-        guard effect.blur != lastBlur || effect.monochrome != lastMonochrome else { return }
-        lastBlur = effect.blur
-        lastMonochrome = effect.monochrome
+    func apply(blur radius: Double) {
+        guard radius != lastBlur else { return }
+        lastBlur = radius
 
-        // Replace the filters so Core Animation submits the new values to the compositor.
-        var filters: [NSObject] = []
-        if effect.blur > 0, let blur = Self.filter("gaussianBlur", key: "inputRadius", type: filterType) {
-            blur.setValue(effect.blur * 48, forKey: "inputRadius")
-            filters.append(blur)
+        // Replace the filter so Core Animation submits the new radius to the compositor.
+        guard radius > 0, let filter = Self.filter("gaussianBlur", key: "inputRadius", type: filterType) else {
+            layer.isHidden = true
+            layer.filters = nil
+            return
         }
-        if supportsSaturation, effect.monochrome > 0,
-           let saturation = Self.filter("colorSaturate", key: "inputAmount", type: filterType) {
-            saturation.setValue(1 - effect.monochrome, forKey: "inputAmount")
-            filters.append(saturation)
+
+        filter.setValue(radius * 48, forKey: "inputRadius")
+        // Preserve the backdrop's coverage at window edges as the radius increases.
+        let normalization = "inputNormalizeEdges"
+        if let keys = filter.value(forKey: "inputKeys") as? [String], keys.contains(normalization) {
+            filter.setValue(true, forKey: normalization)
         }
-        layer.isHidden = filters.isEmpty
-        layer.opacity = effect.blur > 0 ? Float(max(0.78, effect.monochrome)) : 1
-        layer.filters = filters
+        layer.filters = [filter]
+        layer.isHidden = false
     }
 
     private static func filter(_ name: String, key: String, type: NSObject.Type) -> NSObject? {

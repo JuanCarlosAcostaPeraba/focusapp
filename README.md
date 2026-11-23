@@ -20,7 +20,7 @@ La versión pública lleva firma ad hoc y carece de notarización. Si macOS bloq
 
 ## Personalizar el foco
 
-- En **Ajustes → Aspecto** elige mantener nítida la **ventana activa** o la **app activa**. Ajusta el desenfoque, el monocromo, el grano y el tinte, o usa los preajustes **Suave**, **Intenso** y **Solo tinte**.
+- En **Ajustes → Aspecto** elige mantener nítida la **ventana activa** o la **app activa**. Ajusta el desenfoque y el grano, o elige entre los preajustes **Suave** e **Intenso**.
 - En **Pantallas** puedes aplicar el efecto en la pantalla que contiene la mayor parte de la ventana activa o en todas. Puedes incluir las miniaturas de Stage Manager en el desenfoque.
 - En **Ajustes → Activación** puedes asignar un atajo global o activar el gesto de agitar el cursor.
 - En **Exclusiones** puedes mantener nítidas las partes visibles de otras apps. Teleprompter viene incluido por defecto.
@@ -28,7 +28,7 @@ La versión pública lleva firma ad hoc y carece de notarización. Si macOS bloq
 
 Los ajustes se guardan localmente. FocusApp usa metadatos de ventanas para seguir el foco y no solicita permisos de Grabación de Pantalla ni de Accesibilidad.
 
-Core Animation compone el desenfoque en vivo. FocusApp usa APIs privadas para el radio gaussiano y el monocromo. Si no están disponibles o está activado **Reducir transparencia**, usa el material de AppKit con un ajuste de opacidad.
+Core Animation compone el desenfoque en vivo. FocusApp usa APIs privadas para ajustar el radio del desenfoque gaussiano. Si no están disponibles o está activado **Reducir transparencia**, usa el material de AppKit con un ajuste de opacidad.
 
 ## Actualizaciones
 
